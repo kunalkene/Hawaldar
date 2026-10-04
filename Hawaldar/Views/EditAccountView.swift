@@ -10,49 +10,53 @@ import FASwiftUI
 import SwiftData
 
 struct EditAccountView: View {
-    // Variables
-    private var navigationTitle: String = "Edit Account"
-    private var buttonTitle: String = "Save"
-    private var frameHeight: CGFloat = 240
+    @Environment(\.dismiss) private var dismiss
 
-    
-    @Environment(\.modelContext) private var context
-    @Environment(\.dismiss) var dismiss
-    
-    @Bindable var accountData: AccountData
-    
-    
+    let accountData: AccountData
+
+    // Edit a copy so Cancel really cancels.
+    @State private var name: String
+    @State private var identifier: String
+    @State private var icon: String
+
     init(accountData: AccountData) {
         self.accountData = accountData
+        _name = State(initialValue: accountData.accountName)
+        _identifier = State(initialValue: accountData.identifier)
+        _icon = State(initialValue: accountData.accountIcon)
     }
 
-    var body: some View {
-        VStack{
-            Text(navigationTitle).padding(.vertical, 20).fontWeight(.bold)
-            FAText(iconName: accountData.accountIcon, size: 60).padding(0)
-            Form(){
-                Section(footer: Text("Icons from Font Awesome")) {
-                    TextField("Account Icon", text: $accountData.accountIcon)
-                }
-                TextField("Account Name", text: $accountData.accountName)
-                TextField("Email (Optional)", text: $accountData.identifier)
+    private var canSave: Bool { !name.trimmingCharacters(in: .whitespaces).isEmpty }
 
+    var body: some View {
+        Form {
+            IconPickerSection(icon: $icon)
+
+            Section("Account") {
+                TextField("Name", text: $name)
+                TextField("Email / Username (optional)", text: $identifier)
+                    .keyboardType(.emailAddress)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
             }
-            .scrollContentBackground(.hidden)
-            .frame(height: frameHeight)
-            .scrollDisabled(true)
-            Button(buttonTitle){
+        }
+        .navigationTitle("Edit Account")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ModalToolbar(confirmDisabled: !canSave, onCancel: { dismiss() }) {
+                accountData.accountName = name.trimmingCharacters(in: .whitespaces)
+                accountData.identifier = identifier.trimmingCharacters(in: .whitespaces)
+                accountData.accountIcon = icon
                 dismiss()
-            }.padding()
+            }
         }
     }
 }
 
-
 #Preview {
     let config = ModelConfiguration(isStoredInMemoryOnly: true)
     let container = try! ModelContainer(for: AccountData.self, configurations: config)
-    let sampleAccountData = AccountData(accountName: "Apple", privateKey: "apple",identifier: "kunal.kene@icloud.com", accountIcon: "apple", keyType: "test", tokenCode: "111111", isPinned: 0)
-    return EditAccountView(accountData: sampleAccountData)
+    let sample = AccountData(accountName: "Apple", privateKey: "JBSWY3DPEHPK3PXP", identifier: "kunal.kene@icloud.com", accountIcon: "apple", keyType: "test", tokenCode: "111111", isPinned: 0)
+    return NavigationStack { EditAccountView(accountData: sample) }
         .modelContainer(container)
 }

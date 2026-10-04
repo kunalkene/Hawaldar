@@ -10,10 +10,14 @@ import SwiftData
 
 @main
 struct HawaldarApp: App {
-    @AppStorage("isDarkMode") private var isDarkMode: Bool = true
+    @AppStorage("appearance") private var appearance: AppAppearance = .system
+    @AppStorage(AccentStore.key) private var accentStored = ""
+
     var body: some Scene {
         WindowGroup {
-            MainView().preferredColorScheme(isDarkMode ? .dark : .light)
+            MainView()
+                .preferredColorScheme(appearance.colorScheme)
+                .tint(AccentStore.color(from: accentStored))
         }
         .modelContainer(for: AccountData.self)
     }

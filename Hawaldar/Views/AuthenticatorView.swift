@@ -7,108 +7,228 @@
 
 import SwiftUI
 import SwiftData
-import SwiftOTP
+
+private enum AuthSheet: Identifiable {
+    case scan, manual, settings
+    var id: Self { self }
+}
+
+/// iOS 26: search field lives in the bottom bar. Earlier systems keep it under the title.
+private struct BottomSearchToolbar: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26, *) {
+            content.toolbar {
+                DefaultToolbarItem(kind: .search, placement: .bottomBar)
+            }
+        } else {
+            content
+        }
+    }
+}
 
 struct AuthenticatorView: View {
-    @State private var animationCount = 1
-    @State private var showCamera = false
-    @State private var showAddView = false
-    @Query(sort: \AccountData.isPinned, order: .reverse) private var accountData: [AccountData]
-    @StateObject var progressManager = ProgressManager()
-    
+    @Environment(\.modelContext) private var context
+    @Query(sort: \AccountData.isPinned, order: .reverse) private var accounts: [AccountData]
+
+    @State private var sheet: AuthSheet?
+    @State private var accountToEdit: AccountData?
+    @State private var accountToDelete: AccountData?
+    @State private var searchText = ""
+    @State private var pinTick = 0
+    @AppStorage(CodeVisibility.defaultsKey) private var flipToHide = false
+    @StateObject private var visibility = CodeVisibility()
+    @State private var pendingImport: [GoogleMigration.Imported] = []
+    @State private var skippedDuplicates = 0
+    @State private var showImportDialog = false
+
+    private var filtered: [AccountData] {
+        guard !searchText.isEmpty else { return accounts }
+        return accounts.filter {
+            $0.accountName.localizedCaseInsensitiveContains(searchText)
+                || $0.identifier.localizedCaseInsensitiveContains(searchText)
+        }
+    }
+
     var body: some View {
-        NavigationView{
-            ScrollView{
-                VStack{
-                    if(progressManager.refresh){
-                        // Nothing
+        NavigationStack {
+            Group {
+                if accounts.isEmpty {
+                    ContentUnavailableView {
+                        Label("No Accounts", systemImage: "key.viewfinder")
+                    } description: {
+                        Text("Add a 2FA account by scanning a QR code or entering the key manually.")
+                    } actions: {
+                        Button("Scan QR Code") { sheet = .scan }
+                            .buttonStyle(.borderedProminent)
+                        Button("Enter Manually") { sheet = .manual }
                     }
-                    ForEach(accountData){item in
-                        AuthCodeView(accountData: item, authCode: TOTP(secret: base32DecodeToData(item.privateKey) ?? Data(hex: "1"))?.generate(time: Date.now) ?? "111111", progressManager: progressManager)
-                        if(item != accountData.last){
-                            Divider().padding(.horizontal,20)
+                } else {
+                    List {
+                        let pinned = filtered.filter { $0.isPinned != 0 }
+                        let others = filtered.filter { $0.isPinned == 0 }
+                        if !pinned.isEmpty {
+                            Section("Pinned") { ForEach(pinned) { row($0) } }
+                        }
+                        // Same Section identity whether or not anything is pinned,
+                        // so rows slide between sections instead of being rebuilt.
+                        Section {
+                            ForEach(others) { row($0) }
+                        } header: {
+                            if !pinned.isEmpty { Text("Accounts") }
                         }
                     }
+                    .listStyle(.insetGrouped)
+                    .contentMargins(.top, 12, for: .scrollContent)
+                    .searchable(text: $searchText, prompt: "Search accounts")
+                    .animation(.snappy(duration: 0.4), value: accounts.map(\.isPinned))
+                    .sensoryFeedback(.impact(flexibility: .soft), trigger: pinTick)
                 }
-                .padding(.top, 10)
-                .navigationTitle("Hawaldar")
-                .toolbar(content: {
-                    
-                    Button{
-                        showCamera.toggle()
-                    }label:{
-                        Image(systemName: "camera").foregroundStyle(.accent)
-                    }.sheet(isPresented: $showCamera){
-                        NavigationView{
-                            NewAccountView(isShowingScanner: true)
-                        }.presentationDetents([.height(460)]).presentationDragIndicator(.visible)
+            }
+            .navigationTitle("Hawaldar")
+            .onChange(of: flipToHide) { _, enabled in
+                if enabled { visibility.start() } else { visibility.stop() }
+            }
+            .onAppear { if flipToHide { visibility.start() } }
+            .sensoryFeedback(.impact(weight: .medium), trigger: visibility.hidden)
+            .task {
+                // One-time move of legacy plaintext secrets into the Keychain.
+                for account in accounts { account.moveSecretToKeychain() }
+            }
+            .toolbar {
+                if !accounts.isEmpty {
+                    ToolbarItem(placement: .topBarTrailing) { SharedCountdownRing() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { sheet = .settings } label: {
+                        Image(systemName: "gearshape")
                     }
-                    
-                    Button{
-                        animationCount += 1
-                        showAddView.toggle()
-                        // Action
-                    }label:{
-                        Image(systemName: "plus.circle")
-                            .resizable()
-                            .frame(width: 25, height: 25)
-                            .foregroundStyle(.accent).symbolEffect(
-                                .bounce,
-                                value: animationCount
-                            )
-                    }.sheet(isPresented: $showAddView){
-                        NavigationView{
-                            NewAccountView()
-                        }.presentationDetents([.height(550)]).presentationDragIndicator(.visible)
+                    .accessibilityLabel("Settings")
+                }
+                ToolbarItem(placement: .topBarTrailing) { addMenu }
+            }
+            .modifier(BottomSearchToolbar())
+            .sheet(item: $sheet, onDismiss: {
+                // Wait for the add sheet to finish closing before presenting the import prompt.
+                if !pendingImport.isEmpty { showImportDialog = true }
+            }) { sheet in
+                switch sheet {
+                case .settings:
+                    SettingsView()
+                case .scan:
+                    ScanAccountView { accounts, skipped in
+                        pendingImport = accounts
+                        skippedDuplicates = skipped
                     }
-                    
-                })
-            }.refreshable {
-                print("Refreshed")
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
+                case .manual:
+                    NavigationStack {
+                        NewAccountView()
+                    }
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+                }
+            }
+            .sheet(item: $accountToEdit) { account in
+                NavigationStack {
+                    EditAccountView(accountData: account)
+                }
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+            }
+            .confirmationDialog(
+                "Import \(pendingImport.count) account\(pendingImport.count == 1 ? "" : "s")?",
+                isPresented: $showImportDialog,
+                titleVisibility: .visible
+            ) {
+                Button("Import \(pendingImport.count) Account\(pendingImport.count == 1 ? "" : "s")") {
+                    importPending()
+                }
+                Button("Cancel", role: .cancel) { pendingImport = [] }
+            } message: {
+                Text(pendingImport.map(\.name).joined(separator: ", ")
+                     + (skippedDuplicates > 0 ? "\n\(skippedDuplicates) already added and skipped." : ""))
+            }
+            .confirmationDialog(
+                "Delete \(accountToDelete?.accountName ?? "account")?",
+                isPresented: Binding(get: { accountToDelete != nil },
+                                     set: { if !$0 { accountToDelete = nil } }),
+                titleVisibility: .visible
+            ) {
+                Button("Delete", role: .destructive) {
+                    if let account = accountToDelete {
+                        account.deleteSecret()
+                        context.delete(account)
+                    }
+                    accountToDelete = nil
+                }
+            } message: {
+                Text("Make sure you can still sign in without this code. This can't be undone.")
             }
         }
-        
     }
-}
 
-class ProgressManager: ObservableObject {
-    @Published var progress: CGFloat
-    @Published var refresh: Bool = false
-    private var timer: Timer?
-    
-    init(progress: CGFloat = currentTimeAsFloat()) {
-        self.progress = progress
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { (timer) in
-            self.progress += 0.0333333
-            if self.progress >= 1.0{
-                self.progress = currentTimeAsFloat()
-                self.refresh.toggle()
-            }
+    private func row(_ item: AccountData) -> some View {
+        AuthCodeView(accountData: item, isHidden: visibility.hidden) {
+            withAnimation(.snappy) { visibility.hidden = false }
         }
+        .listRowSeparator(.hidden)
+            .contextMenu {
+                Button { togglePin(item) } label: {
+                    Label(item.isPinned == 0 ? "Pin" : "Unpin",
+                          systemImage: item.isPinned == 0 ? "pin" : "pin.slash")
+                }
+                Button { accountToEdit = item } label: {
+                    Label("Edit", systemImage: "pencil")
+                }
+                Button(role: .destructive) { accountToDelete = item } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            }
     }
-    
-    deinit {
-        timer?.invalidate()
+
+    private var addMenu: some View {
+        Menu {
+            Button { sheet = .scan } label: {
+                Label("Scan QR Code", systemImage: "qrcode.viewfinder")
+            }
+            Button { sheet = .manual } label: {
+                Label("Enter Manually", systemImage: "keyboard")
+            }
+        } label: {
+            Image(systemName: "plus")
+        }
+        .accessibilityLabel("Add account")
+    }
+
+    private func importPending() {
+        for item in pendingImport {
+            let account = AccountData(
+                accountName: item.name,
+                privateKey: item.secret,
+                identifier: item.identifier,
+                accountIcon: IconCatalog.guess(for: item.name) ?? "keybase",
+                keyType: "Time Based",
+                tokenCode: "",
+                isPinned: 0,
+                digits: item.digits,
+                period: item.period,
+                algorithm: item.algorithm
+            )
+            account.moveSecretToKeychain()
+            context.insert(account)
+        }
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        pendingImport = []
+    }
+
+    private func togglePin(_ account: AccountData) {
+        pinTick += 1
+        withAnimation(.snappy(duration: 0.4)) { account.isPinned = account.isPinned == 0 ? 1 : 0 }
     }
 }
-
-func currentTimeAsFloat() -> CGFloat {
-  let calendar = Calendar.current
-  let now = Date()
-  let components = calendar.dateComponents([.minute, .second], from: now)
-
-  guard let minute = components.minute, let second = components.second else { return 0.0 }
-
-  // Calculate total seconds elapsed in the current minute
-  let elapsedSeconds = CGFloat(minute) * 60.0 + CGFloat(second)
-
-  // Normalize to value between 0.0 and 1.0 within a 30-second cycle
-  let normalizedTime = fmod(elapsedSeconds, 30.0) / 30.0
-
-  return normalizedTime
-}
-
 
 #Preview {
     AuthenticatorView()
+        .modelContainer(for: AccountData.self, inMemory: true)
 }
