@@ -13,15 +13,25 @@ private enum AuthSheet: Identifiable {
     var id: Self { self }
 }
 
-/// iOS 26: search field lives in the bottom bar. Earlier systems keep it under the title.
-private struct BottomSearchToolbar: ViewModifier {
+/// iOS 26: search, Settings and Add share the bottom bar. Earlier systems keep search under
+/// the title and put Settings and Add in the top bar.
+private struct BottomBarToolbar<Settings: View, Add: View>: ViewModifier {
+    let settings: Settings
+    let add: Add
+
     func body(content: Content) -> some View {
         if #available(iOS 26, *) {
             content.toolbar {
                 DefaultToolbarItem(kind: .search, placement: .bottomBar)
+                ToolbarSpacer(.fixed, placement: .bottomBar)
+                ToolbarItem(placement: .bottomBar) { settings }
+                ToolbarItem(placement: .bottomBar) { add }
             }
         } else {
-            content
+            content.toolbar {
+                ToolbarItem(placement: .topBarTrailing) { settings }
+                ToolbarItem(placement: .topBarTrailing) { add }
+            }
         }
     }
 }
@@ -79,7 +89,7 @@ struct AuthenticatorView: View {
                     }
                     .listStyle(.insetGrouped)
                     .contentMargins(.top, 12, for: .scrollContent)
-                    .searchable(text: $searchText, prompt: "Search accounts")
+                    .searchable(text: $searchText, prompt: "Search Codes")
                     .animation(.snappy(duration: 0.4), value: accounts.map(\.isPinned))
                     .sensoryFeedback(.impact(flexibility: .soft), trigger: pinTick)
                 }
@@ -95,18 +105,9 @@ struct AuthenticatorView: View {
                 for account in accounts { account.moveSecretToKeychain() }
             }
             .toolbar {
-                if !accounts.isEmpty {
-                    ToolbarItem(placement: .topBarTrailing) { SharedCountdownRing() }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { sheet = .settings } label: {
-                        Image(systemName: "gearshape")
-                    }
-                    .accessibilityLabel("Settings")
-                }
-                ToolbarItem(placement: .topBarTrailing) { addMenu }
+                if !accounts.isEmpty { ringToolbarItem }
             }
-            .modifier(BottomSearchToolbar())
+            .modifier(BottomBarToolbar(settings: settingsButton, add: addMenu))
             .sheet(item: $sheet, onDismiss: {
                 // Wait for the add sheet to finish closing before presenting the import prompt.
                 if !pendingImport.isEmpty { showImportDialog = true }
@@ -185,6 +186,24 @@ struct AuthenticatorView: View {
                     Label("Delete", systemImage: "trash")
                 }
             }
+    }
+
+    /// Plain, non-interactive ring: iOS 26 would otherwise wrap it in a glass button circle.
+    @ToolbarContentBuilder
+    private var ringToolbarItem: some ToolbarContent {
+        if #available(iOS 26, *) {
+            ToolbarItem(placement: .topBarTrailing) { SharedCountdownRing() }
+                .sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .topBarTrailing) { SharedCountdownRing() }
+        }
+    }
+
+    private var settingsButton: some View {
+        Button { sheet = .settings } label: {
+            Image(systemName: "gearshape")
+        }
+        .accessibilityLabel("Settings")
     }
 
     private var addMenu: some View {

@@ -113,6 +113,7 @@ struct AuthCodeView: View {
         Group {
             if copied {
                 Label("Copied", systemImage: "doc.on.doc.fill")
+                    .font(.footnote.weight(.semibold))
                     .foregroundStyle(.secondary)
             } else if isHidden, let code {
                 let half = code.count / 2

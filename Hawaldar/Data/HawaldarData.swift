@@ -9,6 +9,10 @@ import Foundation
 import SwiftData
 import Security
 import SwiftOTP
+import CryptoKit
+import CommonCrypto
+import SwiftUI
+import UniformTypeIdentifiers
 
 /// Secrets live in the Keychain; the model only keeps a "kc:<uuid>" reference.
 enum KeychainStore {
@@ -242,4 +246,90 @@ private struct ProtoReader {
         }
         return index <= data.count
     }
+}
+
+/// Password-encrypted backup file: PBKDF2-SHA256 -> AES-256-GCM, wrapped in a small JSON envelope.
+enum BackupCrypto {
+    struct Account: Codable {
+        var name: String
+        var identifier: String
+        var secret: String
+        var icon: String
+        var algorithm: String
+        var digits: Int
+        var period: Int
+        var pinned: Bool
+    }
+
+    struct Envelope: Codable {
+        var app = "Hawaldar"
+        var version = 1
+        var kdf = "PBKDF2-HMAC-SHA256"
+        var iterations: Int
+        var salt: Data
+        var sealed: Data      // AES.GCM combined: nonce + ciphertext + tag
+    }
+
+    enum BackupError: LocalizedError {
+        case wrongPassword, notABackup, unsupported
+
+        var errorDescription: String? {
+            switch self {
+            case .wrongPassword: "That password didn't work. Check it and try again."
+            case .notABackup: "That file isn't a Hawaldar backup."
+            case .unsupported: "That backup was made by a newer version of Hawaldar."
+            }
+        }
+    }
+
+    static let iterations = 600_000
+
+    static func isBackup(_ data: Data) -> Bool {
+        (try? JSONDecoder().decode(Envelope.self, from: data))?.app == "Hawaldar"
+    }
+
+    static func encrypt(_ accounts: [Account], password: String) throws -> Data {
+        let salt = Data((0..<16).map { _ in UInt8.random(in: .min ... .max) })
+        let key = deriveKey(password: password, salt: salt, iterations: iterations)
+        let plain = try JSONEncoder().encode(accounts)
+        guard let combined = try AES.GCM.seal(plain, using: key).combined else { throw BackupError.notABackup }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(Envelope(iterations: iterations, salt: salt, sealed: combined))
+    }
+
+    static func decrypt(_ data: Data, password: String) throws -> [Account] {
+        guard let envelope = try? JSONDecoder().decode(Envelope.self, from: data), envelope.app == "Hawaldar" else {
+            throw BackupError.notABackup
+        }
+        guard envelope.version == 1, (1...10_000_000).contains(envelope.iterations) else { throw BackupError.unsupported }
+        let key = deriveKey(password: password, salt: envelope.salt, iterations: envelope.iterations)
+        guard let box = try? AES.GCM.SealedBox(combined: envelope.sealed),
+              let plain = try? AES.GCM.open(box, using: key) else { throw BackupError.wrongPassword }
+        guard let accounts = try? JSONDecoder().decode([Account].self, from: plain) else { throw BackupError.notABackup }
+        return accounts
+    }
+
+    private static func deriveKey(password: String, salt: Data, iterations: Int) -> SymmetricKey {
+        let pw = Array(password.precomposedStringWithCompatibilityMapping.utf8).map { Int8(bitPattern: $0) }
+        var derived = [UInt8](repeating: 0, count: 32)
+        salt.withUnsafeBytes { saltBytes in
+            _ = CCKeyDerivationPBKDF(
+                CCPBKDFAlgorithm(kCCPBKDF2), pw, pw.count,
+                saltBytes.bindMemory(to: UInt8.self).baseAddress, salt.count,
+                CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256), UInt32(iterations),
+                &derived, derived.count
+            )
+        }
+        return SymmetricKey(data: derived)
+    }
+}
+
+struct BackupDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.json, .plainText] }
+    var data: Data
+
+    init(data: Data) { self.data = data }
+    init(configuration: ReadConfiguration) throws { data = configuration.file.regularFileContents ?? Data() }
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper { FileWrapper(regularFileWithContents: data) }
 }
