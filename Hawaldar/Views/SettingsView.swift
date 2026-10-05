@@ -134,7 +134,7 @@ struct SettingsView: View {
                         }
                     }
                     Button("Restore from Backup…") { showImporter = true }
-                    HoldToConfirmRow(title: "Hold to Export Accounts") {
+                    Button("Export Accounts") {
                         Task {
                             if await lock.authenticate(reason: "Export your accounts") { exportPlain() }
                         }
@@ -161,10 +161,7 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ModalToolbar(onConfirm: { dismiss() })
-            }
+            .navigationBarTitleDisplayMode(.large)
             .sheet(item: $passwordMode, onDismiss: {
                 // Present follow-ups only after the sheet has finished closing.
                 if backupDocument != nil { showExporter = true }
@@ -217,50 +214,6 @@ struct SettingsView: View {
                 Text("You may lose access to services that rely on these codes. This can't be undone.")
             }
         }
-    }
-}
-
-/// A row that must be pressed and held; a tinted fill sweeps across while holding.
-private struct HoldToConfirmRow: View {
-    let title: String
-    var duration: Double = 1.0
-    let action: () -> Void
-
-    @State private var progress: CGFloat = 0
-    @State private var completed = 0
-
-    var body: some View {
-        HStack {
-            Text(title).foregroundStyle(Color.accentColor)
-            Spacer()
-            Image(systemName: "hand.tap")
-                .foregroundStyle(.secondary)
-        }
-        .contentShape(Rectangle())
-        .onLongPressGesture(minimumDuration: duration, maximumDistance: 40) {
-            completed += 1
-            withAnimation(.easeOut(duration: 0.2)) { progress = 0 }
-            action()
-        } onPressingChanged: { pressing in
-            withAnimation(pressing ? .linear(duration: duration) : .easeOut(duration: 0.2)) {
-                progress = pressing ? 1 : 0
-            }
-        }
-        .listRowBackground(
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Color(.secondarySystemGroupedBackground)
-                    Color.accentColor.opacity(0.18)
-                        .frame(width: geo.size.width * progress)
-                }
-            }
-        )
-        .sensoryFeedback(.impact(weight: .medium), trigger: completed)
-        // VoiceOver and Switch Control users can't hold, so expose a direct action.
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(title)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { action() }
     }
 }
 

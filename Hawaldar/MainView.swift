@@ -90,12 +90,16 @@ final class CodeVisibility: ObservableObject {
 
 struct MainView: View {
     @StateObject private var lock = AppLock()
+    @StateObject private var visibility = CodeVisibility()
+    @AppStorage(CodeVisibility.defaultsKey) private var flipToHide = false
+    @AppStorage(AccentStore.key) private var accentStored = ""
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ZStack {
-            AuthenticatorView()
+            tabs
                 .environmentObject(lock)
+                .environmentObject(visibility)
 
             if lock.isLocked || scenePhase != .active && AppLock.isEnabled {
                 LockScreen(lock: lock)
@@ -113,9 +117,29 @@ struct MainView: View {
                 break
             }
         }
+        .onChange(of: flipToHide) { _, enabled in
+            if enabled { visibility.start() } else { visibility.stop() }
+        }
+        .onAppear { if flipToHide { visibility.start() } }
         .task {
             if lock.isLocked { await lock.unlock() }
         }
+    }
+
+    /// The user's accent colour for screen content (the tab bar itself stays neutral).
+    private var contentTint: Color { AccentStore.color(from: accentStored) ?? Color("AccentColor") }
+
+    /// Codes and Settings tabs. Search lives on the Codes page: pull the list down to start it.
+    private var tabs: some View {
+        TabView {
+            AuthenticatorView()
+                .tint(contentTint)
+                .tabItem { Label("Codes", systemImage: "key.fill") }
+            SettingsView()
+                .tint(contentTint)
+                .tabItem { Label("Settings", systemImage: "gearshape") }
+        }
+        .tint(.primary)
     }
 }
 

@@ -9,34 +9,45 @@ import SwiftUI
 import SwiftData
 
 private enum AuthSheet: Identifiable {
-    case scan, manual, settings
+    case scan, manual
     var id: Self { self }
 }
 
-/// iOS 26: search, Settings and Add share the bottom bar. Earlier systems keep search under
-/// the title and put Settings and Add in the top bar.
-private struct BottomBarToolbar<Settings: View, Add: View>: ViewModifier {
-    let settings: Settings
-    let add: Add
+/// Search stays hidden until the toolbar's search button opens it. (iOS 17 keeps a normal
+/// always-available search field, since the button needs iOS 18's `isPresented` search.)
+private struct SearchField: ViewModifier {
+    @Binding var text: String
+    @Binding var presented: Bool
 
     func body(content: Content) -> some View {
-        if #available(iOS 26, *) {
-            content.toolbar {
-                DefaultToolbarItem(kind: .search, placement: .bottomBar)
-                ToolbarSpacer(.fixed, placement: .bottomBar)
-                ToolbarItem(placement: .bottomBar) { settings }
-                ToolbarItem(placement: .bottomBar) { add }
+        if #available(iOS 18, *) {
+            if presented {
+                content.searchable(text: $text, isPresented: $presented, prompt: "Search Codes")
+            } else {
+                content
             }
         } else {
-            content.toolbar {
-                ToolbarItem(placement: .topBarTrailing) { settings }
-                ToolbarItem(placement: .topBarTrailing) { add }
-            }
+            content.searchable(text: $text, prompt: "Search Codes")
+        }
+    }
+}
+
+/// "3 accounts" under the large title (iOS 26 navigation subtitle).
+private struct AccountCountSubtitle: ViewModifier {
+    let count: Int
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26, *), count > 0 {
+            content.navigationSubtitle("\(count) account\(count == 1 ? "" : "s")")
+        } else {
+            content
         }
     }
 }
 
 struct AuthenticatorView: View {
+    @State private var searchPresented = false
+
     @Environment(\.modelContext) private var context
     @Query(sort: \AccountData.isPinned, order: .reverse) private var accounts: [AccountData]
 
@@ -45,8 +56,7 @@ struct AuthenticatorView: View {
     @State private var accountToDelete: AccountData?
     @State private var searchText = ""
     @State private var pinTick = 0
-    @AppStorage(CodeVisibility.defaultsKey) private var flipToHide = false
-    @StateObject private var visibility = CodeVisibility()
+    @EnvironmentObject private var visibility: CodeVisibility
     @State private var pendingImport: [GoogleMigration.Imported] = []
     @State private var skippedDuplicates = 0
     @State private var showImportDialog = false
@@ -72,6 +82,8 @@ struct AuthenticatorView: View {
                             .buttonStyle(.borderedProminent)
                         Button("Enter Manually") { sheet = .manual }
                     }
+                } else if !searchText.isEmpty, filtered.isEmpty {
+                    ContentUnavailableView.search(text: searchText)
                 } else {
                     List {
                         let pinned = filtered.filter { $0.isPinned != 0 }
@@ -88,17 +100,15 @@ struct AuthenticatorView: View {
                         }
                     }
                     .listStyle(.insetGrouped)
-                    .contentMargins(.top, 12, for: .scrollContent)
-                    .searchable(text: $searchText, prompt: "Search Codes")
+                    .contentMargins(.top, filtered.contains { $0.isPinned != 0 } ? 0 : 24, for: .scrollContent)
+                    .listSectionSpacing(.compact)
+                    .modifier(SearchField(text: $searchText, presented: $searchPresented))
                     .animation(.snappy(duration: 0.4), value: accounts.map(\.isPinned))
                     .sensoryFeedback(.impact(flexibility: .soft), trigger: pinTick)
                 }
             }
-            .navigationTitle("Hawaldar")
-            .onChange(of: flipToHide) { _, enabled in
-                if enabled { visibility.start() } else { visibility.stop() }
-            }
-            .onAppear { if flipToHide { visibility.start() } }
+            .navigationTitle("Codes")
+            .modifier(AccountCountSubtitle(count: accounts.count))
             .sensoryFeedback(.impact(weight: .medium), trigger: visibility.hidden)
             .task {
                 // One-time move of legacy plaintext secrets into the Keychain.
@@ -106,15 +116,14 @@ struct AuthenticatorView: View {
             }
             .toolbar {
                 if !accounts.isEmpty { ringToolbarItem }
+                searchToolbarItem
+                ToolbarItem(placement: .topBarTrailing) { addMenu }
             }
-            .modifier(BottomBarToolbar(settings: settingsButton, add: addMenu))
             .sheet(item: $sheet, onDismiss: {
                 // Wait for the add sheet to finish closing before presenting the import prompt.
                 if !pendingImport.isEmpty { showImportDialog = true }
             }) { sheet in
                 switch sheet {
-                case .settings:
-                    SettingsView()
                 case .scan:
                     ScanAccountView { accounts, skipped in
                         pendingImport = accounts
@@ -175,16 +184,20 @@ struct AuthenticatorView: View {
         }
         .listRowSeparator(.hidden)
             .contextMenu {
+                // Neutral icons: keep the app's accent colour out of the menu.
                 Button { togglePin(item) } label: {
                     Label(item.isPinned == 0 ? "Pin" : "Unpin",
                           systemImage: item.isPinned == 0 ? "pin" : "pin.slash")
                 }
+                .tint(.primary)
                 Button { accountToEdit = item } label: {
                     Label("Edit", systemImage: "pencil")
                 }
+                .tint(.primary)
                 Button(role: .destructive) { accountToDelete = item } label: {
                     Label("Delete", systemImage: "trash")
                 }
+                .tint(.red)
             }
     }
 
@@ -192,18 +205,25 @@ struct AuthenticatorView: View {
     @ToolbarContentBuilder
     private var ringToolbarItem: some ToolbarContent {
         if #available(iOS 26, *) {
-            ToolbarItem(placement: .topBarTrailing) { SharedCountdownRing() }
+            ToolbarItem(placement: .topBarLeading) { SharedCountdownRing() }
                 .sharedBackgroundVisibility(.hidden)
         } else {
-            ToolbarItem(placement: .topBarTrailing) { SharedCountdownRing() }
+            ToolbarItem(placement: .topBarLeading) { SharedCountdownRing() }
         }
     }
 
-    private var settingsButton: some View {
-        Button { sheet = .settings } label: {
-            Image(systemName: "gearshape")
+    /// Opens the search field and keyboard. Needs iOS 18's `isPresented` search.
+    @ToolbarContentBuilder
+    private var searchToolbarItem: some ToolbarContent {
+        if #available(iOS 18, *) {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { searchPresented = true } label: {
+                    Image(systemName: "magnifyingglass")
+                }
+                .tint(.primary)
+                .accessibilityLabel("Search")
+            }
         }
-        .accessibilityLabel("Settings")
     }
 
     private var addMenu: some View {
@@ -217,6 +237,7 @@ struct AuthenticatorView: View {
         } label: {
             Image(systemName: "plus")
         }
+        .tint(.primary)
         .accessibilityLabel("Add account")
     }
 
@@ -249,5 +270,6 @@ struct AuthenticatorView: View {
 
 #Preview {
     AuthenticatorView()
+        .environmentObject(CodeVisibility())
         .modelContainer(for: AccountData.self, inMemory: true)
 }
